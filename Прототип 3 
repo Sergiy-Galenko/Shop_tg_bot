@@ -1,0 +1,292 @@
+'''
+import json
+import asyncio
+import logging
+from pathlib import Path
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+
+from aiocryptopay import AioCryptoPay, Networks
+
+from config import TOKEN, CRYPTO_TOKEN
+
+# Налаштування логів
+logging.basicConfig(level=logging.INFO)
+
+# Telegram bot
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher(storage=MemoryStorage())
+
+# CryptoBot API
+crypto = AioCryptoPay(token=CRYPTO_TOKEN, network=Networks.MAIN_NET)
+
+# JSON база
+DB_FILE = Path("db.json")
+
+def read_db() -> dict:
+    if not DB_FILE.exists():
+        return {}
+    with DB_FILE.open(encoding="utf-8") as f:
+        return json.load(f)
+
+def write_db(data: dict) -> None:
+    with DB_FILE.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+# Стан машини
+class Shop(StatesGroup):
+    id = State()
+    balance = State()
+    payment = State()
+    buy_thing = State()
+
+# Кнопка 
+bt = ReplyKeyboardBuilder()
+bt.button(text='ПОПОВНИТИ БАЛАНС')
+bt.button(text='МІЙ КАБІНЕТ')
+bt.button(text='ПРИДБАТИ ЛУТ')
+bt.adjust(1)
+BUY_bt = bt.as_markup(resize_keyboard=True)
+BUY_bt_2 = bt.as_markup(resize_keyboard=True)
+BUY_bt_3 = bt.as_markup(resize_keyboard=True)
+
+# Команда старт
+@dp.message(Command('start'))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    user_key = str(message.from_user.id)
+    db = read_db()
+
+    if user_key in db:
+        game_id = db[user_key]['game_id']
+        balance = db[user_key].get('balance', 0)
+
+        await state.update_data(id=game_id)
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text='CryptoBot', callback_data='button_pressed')
+
+        await message.answer('Раді вітати!\nВаше ігрове ID уже є в базі. Якщо бажаєте його змінити /change_id')
+        await message.answer(f'Ваш баланс: {balance}', reply_markup=BUY_bt)
+        #await message.answer('Виберіть спосіб поповнення', reply_markup=kb.as_markup())
+        await state.set_state(Shop.balance)
+    else:
+        await message.answer('Привіт! Уведи своє ігрове ID:')
+        await state.set_state(Shop.id)
+
+# Обробка ID
+@dp.message(Command('change_id'))
+async def change_id(message: types.Message, state: FSMContext):
+    user_key = str(message.from_user.id)
+    db = read_db()
+    
+    if user_key in db:
+        await state.update_data(is_changing_id=True)
+        await message.answer('Введіть нове ігрове ID:')
+        await state.set_state(Shop.id)
+    else:
+        await message.answer('Ви не зареєстровані в системі. Спробуйте /start')
+
+@dp.message(StateFilter(Shop.id))
+async def process_id(message: types.Message, state: FSMContext):
+    game_id = message.text
+    user_key = str(message.from_user.id)
+    db = read_db()
+    
+    # Перевіряємо чи це зміна ID
+    state_data = await state.get_data()
+    is_changing_id = state_data.get('is_changing_id', False)
+    
+    if is_changing_id:
+        if user_key in db:
+            db[user_key]['game_id'] = game_id
+            write_db(db)
+            await message.answer(f'ID успішно змінено на: {game_id}')
+            await state.clear()
+            await state.set_state(Shop.balance)
+            return
+    
+    # Якщо це нова реєстрація
+    if user_key not in db:
+        db[user_key] = {
+            'game_id': game_id,
+            'balance': 0,
+            'payments': []
+        }
+        write_db(db)
+
+    await state.update_data(id=game_id)
+    kb = InlineKeyboardBuilder()
+    kb.button(text='CryptoBot', callback_data='button_pressed')
+    await message.answer('Успішно зареєстровано!')
+    await message.answer(f'Ваш баланс: 0', reply_markup=BUY_bt)
+    await message.answer('Виберіть спосіб поповнення', reply_markup=kb.as_markup())
+    await state.set_state(Shop.balance)
+
+# Клік по кнопці "ПОПОВНИТИ БАЛАНС"
+@dp.message(StateFilter(Shop.balance))
+async def process_balance(message: types.Message, state: FSMContext):
+    if message.text == 'ПОПОВНИТИ БАЛАНС':
+        kb = InlineKeyboardBuilder()
+        kb.button(text='CryptoBot', callback_data='button_pressed')
+        await message.answer('Виберіть спосіб поповнення', reply_markup=kb.as_markup())
+    elif message.text == 'МІЙ КАБІНЕТ':
+        user_key = str(message.from_user.id)
+        db = read_db()
+        if user_key in db:
+            user_data = db[user_key]
+            game_id = user_data['game_id']
+            balance = user_data.get('balance', 0)
+            
+            # Формуємо історію платежів
+            payment_history = "\n".join([f"Поповнення: {p['amount']} USDT" for p in user_data.get('payments', [])])
+            if not payment_history:
+                payment_history = "Поповнень ще не було"
+            
+            await message.answer(
+                f"🎮 Ваш ігровий ID: {game_id}\n"
+                f"💰 Баланс: {balance} USDT\n\n"
+                f"📊 Історія поповнень:\n{payment_history}",
+                reply_markup=BUY_bt_2
+            )
+        else:
+            await message.answer('Ви не зареєстровані в системі. Спробуйте /start')
+            await state.clear()
+    #else:
+    #    await message.answer('Використовуйте кнопки меню', reply_markup=BUY_bt)
+    await state.set_state(Shop.buy_thing)
+# Клік по кнопці CryptoBot
+@dp.callback_query(lambda c: c.data == 'button_pressed')
+async def handle_button_pressed(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.answer("Напишіть сумму 💸")
+    await state.set_state(Shop.payment)
+
+# Обробка суми поповнення
+@dp.message(StateFilter(Shop.payment))
+async def process_payment(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text)
+        user_key = str(message.from_user.id)
+        db = read_db()
+
+        # Створення інвойсу
+        invoice = await crypto.create_invoice(asset='USDT', amount=amount)
+        invoice_url = invoice.bot_invoice_url
+        invoice_id = invoice.invoice_id
+
+        await message.answer(f"Перейдіть до оплати: {invoice_url}")
+        await message.answer("Після оплати зачекайте кілька секунд...")
+
+        # Чекаємо на оплату (до 90 сек)
+        for _ in range(30):
+            await asyncio.sleep(3)
+            try:
+                result = await crypto.get_invoices(invoice_ids=invoice_id)
+                if result.status == 'paid':
+                    # Оновлюємо баланс
+                    db[user_key]['payments'].append({'amount': amount})
+                    db[user_key]['balance'] = sum(p['amount'] for p in db[user_key]['payments'])
+                    write_db(db)
+
+                    await message.answer(f"✅ Оплата успішна!\nВаш новий баланс: {db[user_key]['balance']}", reply_markup=BUY_bt)
+                    payment_history = "\n".join([f"Поповнення: {p['amount']}" for p in db[user_key]['payments']])
+                    await message.answer(f"Історія поповнень:\n{payment_history}", reply_markup=BUY_bt)
+
+                    await state.set_state(Shop.balance)
+                    return
+            except Exception as e:
+                logging.error(f"Помилка перевірки оплати: {e}")
+                continue
+
+        await message.answer("⏳ Час очікування вичерпано. Якщо ви вже оплатили — спробуйте пізніше /start")
+        await state.set_state(Shop.balance)
+
+    except ValueError:
+        await message.answer("Будь ласка, введіть коректну суму (число)", reply_markup=BUY_bt)
+    except Exception as e:
+        await message.answer(f"❌ Помилка при створенні інвойсу: {str(e)}")
+
+# Закриття CryptoPay клієнта
+async def on_shutdown():
+    await crypto.close()
+
+
+# Команда зміни ID 
+@dp.message(Command('change_id'))
+async def change_id(message: types.Message, state: FSMContext):
+    await message.answer('Введіть нове ігрове ID:')
+    await state.set_state(Shop.id)
+
+# Обробка нового ID (зміна ID) 
+@dp.message(StateFilter(Shop.id))
+async def process_new_id(message:types.Message, state: FSMContext):
+    new_id = message.text
+    user_key = str(message.from_user.id)
+    db = read_db()
+
+    if user_key in db:
+        db[user_key]['game_id'] = new_id
+        write_db(db)
+
+        await message.answer(f'ID успішно змінено на:{new_id}')
+        await state.clear()
+    else:
+        await message.answer('Ви не зареєстровані в системі. Спробуйте /start')
+        await state.clear()
+
+# Кнопка "МІЙ КАБІНЕТ"
+@dp.message(lambda message: message.text == 'МІЙ КАБІНЕТ')
+async def my_kabinet(message: types.Message, state: FSMContext):
+    user_key = str(message.from_user.id)
+    db = read_db()
+    if user_key in db:
+        user_data = db[user_key]
+        game_id = user_data['game_id']
+        balance = user_data.get('balance', 0)
+        
+        # Формуємо історію платежів
+        payment_history = "\n".join([f"Поповнення: {p['amount']} USDT" for p in user_data.get('payments', [])])
+        if not payment_history:
+            payment_history = "Поповнень ще не було"
+        
+        await message.answer(
+            f"🎮 Ваш ігровий ID: {game_id}\n"
+            f"💰 Баланс: {balance} USDT\n\n"
+            f"📊 Історія поповнень:\n{payment_history}",
+            reply_markup=BUY_bt_2
+        )
+    else:
+        await message.answer('Ви не зареєстровані в системі. Спробуйте /start')
+        await state.clear()
+        
+
+@dp.message(StateFilter(Shop.buy_thing))
+async def buy_thing_shop(message: types.Message, state: FSMContext):
+    if message.text == 'ПРИДБАТИ ЛУТ':
+        kb = InlineKeyboardBuilder()
+        kb.button(text='Броня 5 рівня', callback_data='button_pressed1')
+        kb.button(text='Броня 6 рівня', callback_data='button_pressed2')
+        kb.button(text='Шолом 5 рівня', callback_data='button_pressed3')
+        kb.button(text='Шолом 6 рівня', callback_data='button_pressed4')
+        kb.adjust(1)
+        await message.answer('Виберіть що хочете придбати:', reply_markup=kb.as_markup())
+        await state.set_state(Shop.buy_thing)
+    
+
+
+       
+# Запуск
+async def main():
+    await dp.start_polling(bot, shutdown=on_shutdown)
+
+if __name__ == '__main__':
+    asyncio.run(main())
+'''
