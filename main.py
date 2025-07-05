@@ -39,6 +39,10 @@ def write_db(data: dict) -> None:
     with DB_FILE.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+#@dp.message(lambda m: m.sticker is not None)
+#async def get_sticker_id(message: types.Message):
+#    await message.answer(f"file_id цього стікера:\n<code>{message.sticker.file_id}</code>", parse_mode='HTML')
+
 # Стан машини
 class Shop(StatesGroup):
     id = State()
@@ -48,21 +52,30 @@ class Shop(StatesGroup):
 
 # Reply-клавіатура тільки з "МІЙ КАБІНЕТ"
 reply_bt = ReplyKeyboardBuilder()
-reply_bt.button(text='🖥 МІЙ КАБІНЕТ')
+reply_bt.button(text='🖥 Головне меню')
 reply_bt.adjust(1)
 REPLY_BT = reply_bt.as_markup(resize_keyboard=True)
 
 # Inline-клавіатура для кабінету
 def get_cabinet_inline():
     kb = InlineKeyboardBuilder()
-    kb.button(text='ПОПОВНИТИ БАЛАНС', callback_data='topup')
-    kb.button(text='ПРИДБАТИ ЛУТ(METRO ROYALE)', callback_data='buy_loot')
+    kb.button(text='💰 ПОПОВНИТИ БАЛАНС', callback_data='topup')
+    kb.button(text='🎁 ПРИДБАТИ ЛУТ(METRO)', callback_data='buy_loot')
+    kb.button(text='🔄 Змінити ігрове ID', callback_data='change_game_id')
+    kb.button(text='💬 Тех підтримка', callback_data='tech_support')
+    kb.button(text='💵 Продати лут/Стати продавцем', callback_data='become_seller')
     kb.adjust(1)
     return kb.as_markup()
+
+# Заглушка для неактивних кнопок
+@dp.callback_query(lambda c: c.data in ['tech_support', 'become_seller'])
+async def not_implemented(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer("Функція в розробці", show_alert=True)
 
 # Команда старт
 @dp.message(Command('start'))
 async def cmd_start(message: types.Message, state: FSMContext):
+    await message.answer_sticker("CAACAgIAAxkBAAIE92hX8BEkQ-c4nI4mLhl3ga9PPWQ3AALOYwACmxeASsMeUM67z9rwNgQ")
     await state.clear()
     user_key = str(message.from_user.id)
     db = read_db()
@@ -144,7 +157,7 @@ async def process_id(message: types.Message, state: FSMContext):
 # Обробка reply-кнопки "МІЙ КАБІНЕТ"
 @dp.message(StateFilter(Shop.balance))
 async def process_balance(message: types.Message, state: FSMContext):
-    if message.text == '🖥 МІЙ КАБІНЕТ':
+    if message.text == '🖥 Головне меню':
         user_key = str(message.from_user.id)
         db = read_db()
         if user_key in db:
@@ -170,16 +183,33 @@ async def process_balance(message: types.Message, state: FSMContext):
 @dp.callback_query(lambda c: c.data == 'topup')
 async def handle_topup(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
+    state_data = await state.get_data()
+    cabinet_message_id = state_data.get('cabinet_message_id')
+
+    # Клавіатура з кнопкою назад
     kb = InlineKeyboardBuilder()
-    kb.button(text='CryptoBot', callback_data='button_pressed')
-    await callback.message.answer('Виберіть спосіб поповнення:', reply_markup=kb.as_markup())
+    kb.button(text='⬅️ НАЗАД', callback_data='back_to_cabinet')
+    kb.adjust(1)
+
+    if cabinet_message_id:
+        await bot.edit_message_text(
+            chat_id=callback.from_user.id,
+            message_id=cabinet_message_id,
+            text='Введіть суму для поповнення:',
+            reply_markup=kb.as_markup()
+        )
+    else:
+        await callback.message.answer('Введіть суму для поповнення:', reply_markup=kb.as_markup())
+
     await state.set_state(Shop.payment)
+
 # Клік по кнопці CryptoBot
 @dp.callback_query(lambda c: c.data == 'button_pressed')
 async def handle_button_pressed(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     await callback.message.answer("Напишіть сумму 💸")
     await state.set_state(Shop.payment)
+
 # Обробка суми поповнення
 @dp.message(StateFilter(Shop.payment))
 async def process_payment(message: types.Message, state: FSMContext):
@@ -268,27 +298,22 @@ async def handle_buy_loot(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(lambda c: c.data == 'back_to_cabinet')
 async def handle_back_to_cabinet(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    
-    # Отримуємо ID повідомлення з кабінету
     state_data = await state.get_data()
     cabinet_message_id = state_data.get('cabinet_message_id')
-    
+
     if cabinet_message_id:
-        # Повертаємося до кабінету
         user_key = str(callback.from_user.id)
         db = read_db()
         if user_key in db:
             user_data = db[user_key]
             game_id = user_data['game_id']
             balance = user_data.get('balance', 0)
-            
             await bot.edit_message_text(
                 chat_id=callback.from_user.id,
                 message_id=cabinet_message_id,
                 text=f"🎮 Ваш ігровий ID: {game_id}\n💰 Баланс: {balance} USDT",
                 reply_markup=get_cabinet_inline()
             )
-    
     await state.set_state(Shop.balance)
 
 @dp.callback_query(lambda c: c.data == 'gold_stuff')
@@ -386,6 +411,41 @@ async def handle_gold_stuff(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.answer('Виберіть річ', reply_markup=kb.as_markup())
     
     await state.set_state(Shop.buy_thing)
+
+@dp.callback_query(lambda c: c.data == 'change_game_id')
+async def handle_change_game_id(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    state_data = await state.get_data()
+    cabinet_message_id = state_data.get('cabinet_message_id')
+    user_key = str(callback.from_user.id)
+    db = read_db()
+    # Клавіатура з кнопкою назад
+    kb = InlineKeyboardBuilder()
+    kb.button(text='⬅️ НАЗАД', callback_data='back_to_cabinet')
+    kb.adjust(1)
+
+    if user_key in db:
+        await state.update_data(is_changing_id=True)
+        if cabinet_message_id:
+            await bot.edit_message_text(
+                chat_id=callback.from_user.id,
+                message_id=cabinet_message_id,
+                text='Введіть нове ігрове ID:',
+                reply_markup=kb.as_markup()
+            )
+        else:
+            await callback.message.answer('Введіть нове ігрове ID:', reply_markup=kb.as_markup())
+        await state.set_state(Shop.id)
+    else:
+        if cabinet_message_id:
+            await bot.edit_message_text(
+                chat_id=callback.from_user.id,
+                message_id=cabinet_message_id,
+                text='Ви не зареєстровані в системі. Спробуйте /start',
+                reply_markup=kb.as_markup()
+            )
+        else:
+            await callback.message.answer('Ви не зареєстровані в системі. Спробуйте /start', reply_markup=kb.as_markup())
 
 # Закриття CryptoPay клієнта
 async def on_shutdown():

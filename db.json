@@ -15,12 +15,22 @@
     "payments": []
   },
   "960578724": {
-    "game_id": "567890123",
+    "game_id": "567893424",
     "balance": 0.01,
     "payments": [
       {
         "amount": 0.01,
         "invoice_id": 28090788
+      }
+    ]
+  },
+  "7787838974": {
+    "game_id": "56738837388",
+    "balance": 0.01,
+    "payments": [
+      {
+        "amount": 0.01,
+        "invoice_id": 28148576
       }
     ]
   }
