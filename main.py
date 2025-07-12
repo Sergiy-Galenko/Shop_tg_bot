@@ -1,7 +1,5 @@
-import json
 import asyncio
 import logging
-from pathlib import Path
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
@@ -15,6 +13,7 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiocryptopay import AioCryptoPay, Networks
 
 from config import TOKEN, CRYPTO_TOKEN
+import db
 
 # Налаштування логів
 logging.basicConfig(level=logging.INFO)
@@ -25,19 +24,6 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # CryptoBot API
 crypto = AioCryptoPay(token=CRYPTO_TOKEN, network=Networks.MAIN_NET)
-
-# JSON база
-DB_FILE = Path("db.json")
-
-def read_db() -> dict:
-    if not DB_FILE.exists():
-        return {}
-    with DB_FILE.open(encoding="utf-8") as f:
-        return json.load(f)
-
-def write_db(data: dict) -> None:
-    with DB_FILE.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
 
 #@dp.message(lambda m: m.sticker is not None)
 #async def get_sticker_id(message: types.Message):
@@ -78,11 +64,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer_sticker("CAACAgIAAxkBAAIE92hX8BEkQ-c4nI4mLhl3ga9PPWQ3AALOYwACmxeASsMeUM67z9rwNgQ")
     await state.clear()
     user_key = str(message.from_user.id)
-    db = read_db()
+    user_data = await db.get_user(int(user_key))
 
-    if user_key in db:
-        game_id = db[user_key]['game_id']
-        balance = db[user_key].get('balance', 0)
+    if user_data:
+        game_id = user_data['game_id']
+        balance = user_data.get('balance', 0)
         await state.update_data(id=game_id)
         await message.answer('Раді вітати!\nВаше ігрове ID уже є в базі. Якщо бажаєте його змінити /change_id')
         await message.answer(f'Ваш баланс: {balance}', reply_markup=REPLY_BT)
@@ -95,9 +81,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
 @dp.message(Command('change_id'))
 async def change_id(message: types.Message, state: FSMContext):
     user_key = str(message.from_user.id)
-    db = read_db()
-    
-    if user_key in db:
+    user_data = await db.get_user(int(user_key))
+
+    if user_data:
         await state.update_data(is_changing_id=True)
         await message.answer('Введіть нове ігрове ID:')
         await state.set_state(Shop.id)
@@ -108,7 +94,7 @@ async def change_id(message: types.Message, state: FSMContext):
 async def process_id(message: types.Message, state: FSMContext):
     game_id = message.text.strip()
     user_key = str(message.from_user.id)
-    db = read_db()
+    user_data = await db.get_user(int(user_key))
 
     # Перевірка: тільки цифри
     if not game_id.isdigit():
@@ -129,22 +115,16 @@ async def process_id(message: types.Message, state: FSMContext):
     is_changing_id = state_data.get('is_changing_id', False)
 
     if is_changing_id:
-        if user_key in db:
-            db[user_key]['game_id'] = game_id
-            write_db(db)
+        if user_data:
+            await db.update_game_id(int(user_key), game_id)
             await message.answer(f'ID успішно змінено на: {game_id}')
             await state.clear()
             await state.set_state(Shop.balance)
             return
 
     # Якщо це нова реєстрація
-    if user_key not in db:
-        db[user_key] = {
-            'game_id': game_id,
-            'balance': 0,
-            'payments': []
-        }
-        write_db(db)
+    if not user_data:
+        await db.create_user(int(user_key), game_id)
 
     await state.update_data(id=game_id)
     kb = InlineKeyboardBuilder()
@@ -159,9 +139,8 @@ async def process_id(message: types.Message, state: FSMContext):
 async def process_balance(message: types.Message, state: FSMContext):
     if message.text == '🖥 Головне меню':
         user_key = str(message.from_user.id)
-        db = read_db()
-        if user_key in db:
-            user_data = db[user_key]
+        user_data = await db.get_user(int(user_key))
+        if user_data:
             game_id = user_data['game_id']
             balance = user_data.get('balance', 0)
             payment_history = "\n".join([f"Поповнення: {p['amount']} USDT" for p in user_data.get('payments', [])])
@@ -216,7 +195,7 @@ async def process_payment(message: types.Message, state: FSMContext):
     try:
         amount = float(message.text)
         user_key = str(message.from_user.id)
-        db = read_db()
+        user_data = await db.get_user(int(user_key))
 
         # Створення інвойсу
         invoice = await crypto.create_invoice(asset='USDT', amount=amount)
@@ -233,13 +212,12 @@ async def process_payment(message: types.Message, state: FSMContext):
                 result = await crypto.get_invoices(invoice_ids=invoice_id)
                 if result.status == 'paid':
                     # Додаємо платіж лише якщо такого invoice_id ще не було
-                    if not any(p.get('invoice_id') == invoice_id for p in db[user_key]['payments']):
-                        db[user_key]['payments'].append({'amount': amount, 'invoice_id': invoice_id})
-                        db[user_key]['balance'] = sum(p['amount'] for p in db[user_key]['payments'])
-                        write_db(db)
+                    if user_data and not any(p.get('invoice_id') == invoice_id for p in user_data['payments']):
+                        await db.add_payment(int(user_key), amount, invoice_id)
+                        user_data = await db.get_user(int(user_key))
 
-                    await message.answer(f"✅ Оплата успішна!\nВаш новий баланс: {db[user_key]['balance']}", reply_markup=REPLY_BT)
-                    payment_history = "\n".join([f"Поповнення: {p['amount']} USDT" for p in db[user_key]['payments']])
+                    await message.answer(f"✅ Оплата успішна!\nВаш новий баланс: {user_data['balance']}", reply_markup=REPLY_BT)
+                    payment_history = "\n".join([f"Поповнення: {p['amount']} USDT" for p in user_data['payments']])
                     await message.answer(f"Історія поповнень:\n{payment_history}", reply_markup=REPLY_BT)
 
                     await state.set_state(Shop.balance)
@@ -303,16 +281,15 @@ async def handle_back_to_cabinet(callback: types.CallbackQuery, state: FSMContex
 
     if cabinet_message_id:
         user_key = str(callback.from_user.id)
-        db = read_db()
-        if user_key in db:
-            user_data = db[user_key]
-            game_id = user_data['game_id']
-            balance = user_data.get('balance', 0)
+        user_data = await db.get_user(int(user_key))
+        if user_data:
+            game_id = user_data["game_id"]
+            balance = user_data.get("balance", 0)
             await bot.edit_message_text(
                 chat_id=callback.from_user.id,
                 message_id=cabinet_message_id,
                 text=f"🎮 Ваш ігровий ID: {game_id}\n💰 Баланс: {balance} USDT",
-                reply_markup=get_cabinet_inline()
+                reply_markup=get_cabinet_inline(),
             )
     await state.set_state(Shop.balance)
 
@@ -418,13 +395,13 @@ async def handle_change_game_id(callback: types.CallbackQuery, state: FSMContext
     state_data = await state.get_data()
     cabinet_message_id = state_data.get('cabinet_message_id')
     user_key = str(callback.from_user.id)
-    db = read_db()
+    user_data = await db.get_user(int(user_key))
     # Клавіатура з кнопкою назад
     kb = InlineKeyboardBuilder()
     kb.button(text='⬅️ НАЗАД', callback_data='back_to_cabinet')
     kb.adjust(1)
 
-    if user_key in db:
+    if user_data:
         await state.update_data(is_changing_id=True)
         if cabinet_message_id:
             await bot.edit_message_text(
@@ -453,6 +430,7 @@ async def on_shutdown():
 
 # Запуск
 async def main():
+    await db.init_pool()
     await dp.start_polling(bot, shutdown=on_shutdown)
 
 if __name__ == '__main__':
